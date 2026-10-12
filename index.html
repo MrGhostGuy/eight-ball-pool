@@ -169,7 +169,8 @@
   <div class="hint">
     Move mouse to <b>aim</b> &middot; hold <kbd>Click</kbd> or <kbd>Space</kbd> to build power, release to <b>shoot</b> &middot;
     the pad by <b>Power</b> sets your tip position &mdash; up is <b>follow</b>, down is <b>draw</b>, sideways is <b>english</b>.<br>
-    Dashed lines show where the object ball and your cue ball will go. After a foul you get <b>ball in hand</b> &mdash; move the mouse and click to place the cue ball.
+    Dashed lines show where the object ball and your cue ball will go. On the break you may slide the cue ball left or right behind the line &mdash; an off-centre break sprays balls toward the corners.<br>
+    After a foul you get <b>ball in hand</b> anywhere &mdash; move the mouse and click to place the cue ball.
   </div>
 </div>
 
@@ -215,6 +216,8 @@ const SIDE_POCKET_R = 8.0;      // side pockets are wider in real life too
 const SPIN_FOLLOW = 78;         // how hard follow/draw pushes the cue ball
 const SPIN_ENGLISH = 46;        // how hard side english throws it
 const MAX_SPIN = 0.72;          // max tip offset, as a fraction of ball radius
+const RACK_JITTER = 0.12;       // how imperfectly the balls are racked (units)
+const RACK_GAP = 1.05;          // clearance so jitter can never overlap balls
 const HEAD_X = W * 0.25, FOOT_X = W * 0.75, MID_Y = H / 2;
 
 const POCKETS = [
@@ -251,7 +254,8 @@ let balls = [], turn = 'you', phase = 'aim';
 let groups = { you:null, cpu:null };
 let gameOver = null, rackNo = 1, wins = { you:0, cpu:0 };
 let screen = 'title';          // 'title' | 'play' | 'over'
-let aiming = null, ballInHand = false, placing = null;
+let aiming = null, ballInHand = false, placing = null, handZone = null;  // handZone 'break' = behind the head string
+let breakHints = [];   // rack balls that, when struck at an angle, spread the pack best
 let power = 0, charging = false, msg = null, msgT = 0;
 let lastShotInfo = null;
 
@@ -263,16 +267,25 @@ function rack(){
   balls = [ mkBall(0, HEAD_X, MID_Y) ];
   const order = [1,9,2,10,8,3,11,4,12,5,13,6,14,7,15];  // 8 in the middle, 1 at the apex
   const rowGap = 2*R*Math.cos(Math.PI/6);
-  const GAP = 1.006;   // hair of space so the pack isn't permanently in contact
+  const GAP = RACK_GAP;   // hair of space so the pack isn't permanently in contact
   let i = 0;
   for(let row=0; row<5; row++){
     const x = FOOT_X + row*rowGap*GAP;
     for(let k=0; k<=row; k++){
-      const y = MID_Y + (k - row/2) * 2*R * GAP + (Math.random()-0.5)*0.06;
-      balls.push(mkBall(order[i], x + (Math.random()-0.5)*0.06, y));
+      const y = MID_Y + (k - row/2) * 2*R * GAP + (Math.random()-0.5)*RACK_JITTER;
+      balls.push(mkBall(order[i], x + (Math.random()-0.5)*RACK_JITTER, y));
       i++;
     }
   }
+  // the two extreme balls of the back row: clipping one of these at an angle
+  // sprays the pack toward the corners instead of driving straight through it
+  const back = balls.filter(b => b.id !== 0 && b.x > FOOT_X + 3.4*rowGap*GAP);
+  let lo = null, hi = null;
+  for(const b of back){
+    if(!lo || b.y < lo.y) lo = b;
+    if(!hi || b.y > hi.y) hi = b;
+  }
+  breakHints = lo && hi ? [lo.id, hi.id] : [];
 }
 
 function remaining(group){
@@ -563,6 +576,9 @@ function resolveBreak(){
     rack();
     turn = 'you';
     newTurn();
+    handZone = 'break';          // slide the cue ball left/right to break better
+    ballInHand = true;
+    updateHUD();
     return;
   }
   brokeYet = true;
@@ -723,6 +739,23 @@ function aiShoot(){
           bestShot = { score, angle:a, power:pw, target:id };
         }
       }
+    }
+  }
+
+  // If nothing in the search made legal contact (the cue can be boxed in, or
+  // every ghost-ball line is blocked), fall back to simply striking the nearest
+  // own ball. Without this the CPU picks a guaranteed foul and loops forever.
+  if(!bestShot || bestShot.score <= -9000){
+    let nearest = null;
+    for(const id of legal){
+      const t = balls.find(b=>b.id===id);
+      if(!t) continue;
+      const d = Math.hypot(t.x-cue.x, t.y-cue.y);
+      if(!nearest || d < nearest.d) nearest = { d, t };
+    }
+    if(nearest){
+      bestShot = { score:-100, angle: Math.atan2(nearest.t.y-cue.y, nearest.t.x-cue.x),
+                   power:0.45, target:nearest.t.id };
     }
   }
 
@@ -1212,11 +1245,26 @@ function drawAim(){
   if(ballInHand){
     const m = mouseTable();
     if(!m) return;
+    const ok = m.x >= R && m.x <= W-R && m.y >= R && m.y <= H-R && (handZone !== 'break' || m.x <= HEAD_X);
     ctx.save();
     ctx.setLineDash([4,4]);
-    ctx.strokeStyle = 'rgba(245,196,81,.75)'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = ok ? 'rgba(245,196,81,.85)' : 'rgba(255,90,80,.7)';
+    ctx.lineWidth = 1.8;
     ctx.beginPath(); ctx.arc(X(m.x),Y(m.y),S(R),0,Math.PI*2); ctx.stroke();
     ctx.restore();
+    // show which rack balls actually open the table up
+    if(handZone === 'break'){
+      const pulse = 0.45 + 0.35*Math.sin(performance.now()/420);
+      for(const id of breakHints){
+        const b = balls.find(x => x.id === id);
+        if(!b || b.potted) continue;
+        ctx.beginPath();
+        ctx.arc(X(b.x), Y(b.y), S(R)*1.75, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(120,255,170,' + pulse.toFixed(2) + ')';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
     return;
   }
   const legal = legalTargets('you');
@@ -1333,7 +1381,11 @@ function updateHUD(){
   document.getElementById('pcCpu').classList.toggle('active', turn==='cpu' && !gameOver);
   const tt = document.getElementById('turnTxt');
   if(gameOver){ tt.innerHTML = gameOver==='you' ? '<b>You win the rack!</b> Click for a new one.' : '<b>CPU takes the rack.</b> Click for a new one.'; }
-  else if(ballInHand && turn==='you') tt.innerHTML = '<b>Ball in hand</b> — move to place, click to drop.';
+  else if(ballInHand && turn==='you'){
+    tt.innerHTML = handZone === 'break'
+      ? '<b>Break shot.</b> Slide the cue ball behind the line, then clip a <span style="color:#78ffaa">ringed</span> rack ball at an angle — that sprays the corners.'
+      : '<b>Ball in hand</b> — move to place, click to drop.';
+  }
   else if(turn==='you'){
     tt.innerHTML = you8 ? '<b>You are on the 8.</b> Pot it to win the rack.'
                          : 'Your shot. Aim, hold to build power, release.';
@@ -1386,13 +1438,15 @@ cv.addEventListener('mousedown', e => {
   if(ballInHand){
     const m = mouseTable();
     if(m.x < R || m.x > W-R || m.y < R || m.y > H-R) return;
+    // on the break you may only place the cue ball behind the head string
+    if(handZone === 'break' && m.x > HEAD_X) return;
     for(const b of balls){
       if(b.potted || b.id===0) continue;
       if(Math.hypot(b.x-m.x, b.y-m.y) < 2*R){ return; }
     }
     const cue = cueBall();
     cue.x = m.x; cue.y = m.y; cue.vx = 0; cue.vy = 0;
-    ballInHand = false;
+    ballInHand = false; handZone = null;
     sfx('place');
     updateHUD();
     return;
@@ -1624,6 +1678,8 @@ function newGame(){
   gameOver = null; ballInHand = false; aiming = null;
   brokeYet = false; picked = false;
   power = 0; charging = false;
+  handZone = 'break';            // the break is played from the head spot area
+  ballInHand = true;
   updateHUD();
 }
 
@@ -1666,7 +1722,55 @@ window.__pool = {
   giveStick:id=>{ if(!sticks.owned.includes(id)){sticks.owned.push(id);saveSticks(sticks);} },
   physics, simulate, anyMoving,
   openPick, assignGroups,
-  aiTake
+  aiTake,
+  /* helpers for automated play-throughs */
+  autoPlaceCue(){
+    const cue = cueBall();
+    const free = (x,y) => {
+      if(x < R+1 || x > W-R-1 || y < R+1 || y > H-R-1) return false;
+      for(const b of balls){ if(b.potted || b.id===0) continue;
+        if(Math.hypot(b.x-x, b.y-y) < 2*R) return false; }
+      return true;
+    };
+    const maxX = handZone === 'break' ? HEAD_X - 1 : W - R - 1;
+    for(const [x,y] of [[W*0.3,H/2],[W*0.3,H*0.35],[W*0.3,H*0.65],[W*0.5,H*0.3],[W*0.5,H*0.7]]){
+      const cx = Math.min(x, maxX);
+      if(free(cx,y)){ cue.x=cx; cue.y=y; cue.vx=0; cue.vy=0; ballInHand=false; handZone=null; updateHUD(); return true; }
+    }
+    for(let r=6; r<W/2; r+=3){
+      for(let k=0;k<24;k++){
+        const x = Math.min(W/2 + Math.cos(k/24*Math.PI*2)*r, maxX);
+        const y = H/2 + Math.sin(k/24*Math.PI*2)*r*0.5;
+        if(free(x,y)){ cue.x=x; cue.y=y; cue.vx=0; cue.vy=0; ballInHand=false; handZone=null; updateHUD(); return true; }
+      }
+    }
+    return false;
+  },
+  autoShoot(){
+    const cue = cueBall();
+    const legal = legalTargets('you');
+    if(!legal.length) return false;
+    // aim at the nearest legal ball with a decent pot chance, using the real ghost maths
+    let best = null;
+    for(const id of legal){
+      const t = balls.find(b=>b.id===id);
+      if(!t || t.potted) continue;
+      for(const p of POCKETS){
+        const pd = Math.hypot(p.x-t.x, p.y-t.y) || 1;
+        const gx = t.x - (p.x-t.x)/pd*2*R, gy = t.y - (p.y-t.y)/pd*2*R;
+        const a = Math.atan2(gy-cue.y, gx-cue.x);
+        const sim = simulate(balls, Math.cos(a)*maxPower()*0.45, Math.sin(a)*maxPower()*0.45, 1500, id);
+        const s = sim.potted.includes(id) ? 1000 - Math.hypot(p.x-t.x,p.y-t.y) : -Math.hypot(p.x-t.x,p.y-t.y);
+        if(!best || s > best.s) best = { s, a };
+      }
+    }
+    if(!best) return false;
+    aiming = best.a;
+    shoot(best.a, 0.45);
+    simulateShot();
+    setTimeout(afterSim, 30);
+    return true;
+  }
 };
 
 layout();

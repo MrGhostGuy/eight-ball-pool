@@ -26,8 +26,13 @@ https://mrghostguy.github.io/eight-ball-pool/
 Dashed guides show where the object ball and your cue ball will end up, and a
 pocket ring lights up when your line is on.
 
-After a foul you get **ball in hand** — move the mouse and click to place the
-cue ball anywhere legal.
+**The break** — you get ball-in-hand behind the head string, so you can slide
+the cue ball left or right before you shoot. Straight into the apex is a dry
+break about half the time; clipping one of the **ringed** rack balls at an angle
+sends balls to the corners and pots about four times in five.
+
+After a foul you get **ball in hand** anywhere on the table — move the mouse and
+click to place the cue ball.
 
 ## Rules
 
