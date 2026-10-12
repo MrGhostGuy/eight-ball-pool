@@ -64,9 +64,14 @@
   .banner.good{border-color:var(--green);color:var(--green)}
   .banner.bad{border-color:#ff6b5e;color:#ff6b5e}
 
-  .bar{display:flex;align-items:center;gap:12px;margin-top:10px;flex-wrap:wrap}
+  .bar{display:flex;align-items:center;gap:16px;margin-top:10px;flex-wrap:wrap}
   .turn{font-size:12.5px;color:var(--dim);min-width:150px}
   .turn b{color:var(--ink)}
+
+  .spinwrap{display:flex;flex-direction:column;align-items:center;gap:3px}
+  #spinPad{width:70px;height:70px;border-radius:50%;cursor:crosshair;
+    border:1px solid var(--line);background:#0a0d14;display:block}
+  .spinlabel{font-size:9px;letter-spacing:.12em;color:var(--dim);text-transform:uppercase}
   .power{flex:1;min-width:190px;height:13px;border-radius:999px;background:#0a0d14;
     border:1px solid var(--line);overflow:hidden;position:relative}
   .power i{display:block;height:100%;width:0%;border-radius:999px;
@@ -137,6 +142,7 @@
     </div>
     <div class="spacer"></div>
     <button class="btn" id="btnSticks">Cues</button>
+    <button class="btn" id="btnSound">Sound: on</button>
     <select class="btn" id="selDiff">
       <option value="easy">Easy</option>
       <option value="normal" selected>Normal</option>
@@ -152,13 +158,18 @@
 
   <div class="bar">
     <div class="turn" id="turnTxt">Break the table to begin.</div>
+    <div class="spinwrap" title="Cue tip position — up is follow, down is draw, sideways is english">
+      <canvas id="spinPad" width="112" height="112"></canvas>
+      <div class="spinlabel" id="spinLabel">CENTRE</div>
+    </div>
     <div class="plabel">Power</div>
     <div class="power"><i id="pw"></i></div>
   </div>
 
   <div class="hint">
     Move mouse to <b>aim</b> &middot; hold <kbd>Click</kbd> or <kbd>Space</kbd> to build power, release to <b>shoot</b> &middot;
-    after a foul you get <b>ball in hand</b> &mdash; move the mouse and click to place the cue ball.
+    the pad by <b>Power</b> sets your tip position &mdash; up is <b>follow</b>, down is <b>draw</b>, sideways is <b>english</b>.<br>
+    Dashed lines show where the object ball and your cue ball will go. After a foul you get <b>ball in hand</b> &mdash; move the mouse and click to place the cue ball.
   </div>
 </div>
 
@@ -201,6 +212,9 @@ const E_BALL = 0.945;         // ball-ball restitution
 const E_CUSH = 0.84;          // cushion restitution
 const POCKET_R = 7.0;          // corner pockets, video-game generous
 const SIDE_POCKET_R = 8.0;      // side pockets are wider in real life too
+const SPIN_FOLLOW = 78;         // how hard follow/draw pushes the cue ball
+const SPIN_ENGLISH = 46;        // how hard side english throws it
+const MAX_SPIN = 0.72;          // max tip offset, as a fraction of ball radius
 const HEAD_X = W * 0.25, FOOT_X = W * 0.75, MID_Y = H / 2;
 
 const POCKETS = [
@@ -242,7 +256,7 @@ let power = 0, charging = false, msg = null, msgT = 0;
 let lastShotInfo = null;
 
 function mkBall(id,x,y){
-  return { id, x, y, vx:0, vy:0, potted:false, sx:x, sy:y };
+  return { id, x, y, vx:0, vy:0, potted:false, spinX:0, spinY:0 };
 }
 
 function rack(){
@@ -288,8 +302,10 @@ function nearestOnSeg(px,py,ax,ay,bx,by){
   return { x: ax + dx*t, y: ay + dy*t };
 }
 
-/** Advance every ball. Returns {firstContact, railAfter, potted} */
-function physics(list, dt){
+/** Advance every ball. Returns {firstContact, railAfter, potted}.
+ *  `events` is optional and only used by the live shot (never by the AI search)
+ *  so we can play a sound per impact without one firing every physics step. */
+function physics(list, dt, events){
   let firstContact = null, railAfter = false;
   const potted = [];
   let touched = false;
@@ -328,6 +344,20 @@ function physics(list, dt){
           const imp = -(1+E_BALL)*sep/2;
           a.vx -= imp*nx; a.vy -= imp*ny;
           b.vx += imp*nx; b.vy += imp*ny;
+
+          // --- english / follow-draw act on the cue ball at contact ---
+          const cue = a.id === 0 ? a : (b.id === 0 ? b : null);
+          if(cue && (cue.spinX || cue.spinY)){
+            const sgn = (cue === a) ? 1 : -1;
+            const dx = sgn*nx, dy = sgn*ny;          // cue -> object
+            cue.vx += dx * cue.spinY * SPIN_FOLLOW;
+            cue.vy += dy * cue.spinY * SPIN_FOLLOW;
+            const tx = -ny, ty = nx;                // english "throws" the cue ball sideways
+            cue.vx += tx * cue.spinX * SPIN_ENGLISH;
+            cue.vy += ty * cue.spinX * SPIN_ENGLISH;
+            cue.spinX *= 0.3; cue.spinY *= 0.3;
+          }
+          if(events) events.push({ type:'clack', v:-sep, x:(a.x+b.x)/2, y:(a.y+b.y)/2 });
           if(!touched){ firstContact = a.id === 0 ? b.id : (b.id === 0 ? a.id : null); touched = true; }
         }
       }
@@ -354,6 +384,7 @@ function physics(list, dt){
           const vt = b.vx*tx + b.vy*ty;
           b.vx -= vt*0.06*tx;
           b.vy -= vt*0.06*ty;
+          if(events) events.push({ type:'rail', v:-vn, x:b.x, y:b.y });
           if(touched) railAfter = true;
         }
       }
@@ -367,6 +398,7 @@ function physics(list, dt){
       if(Math.hypot(b.x-p.x, b.y-p.y) < (p.r || POCKET_R)){
         b.potted = true; b.vx = 0; b.vy = 0;
         potted.push(b.id);
+        if(events) events.push({ type:'pot', id:b.id, v:Math.hypot(b.vx,b.vy), x:p.x, y:p.y });
         break;
       }
     }
@@ -434,6 +466,7 @@ function endGame(winner){
   if(winner === 'you') awardStick();
   updateHUD();
   showBanner(winner === 'you' ? 'You win!' : 'CPU wins', winner === 'you' ? 'good' : 'bad');
+  sfx(winner === 'you' ? 'win' : 'lose');
 }
 
 function resolveShot(){
@@ -468,6 +501,7 @@ function resolveShot(){
 
   if(foul){
     showBanner('Foul — ' + reason, 'bad');
+    sfx('foul');
     turn = opp;
     newTurn();          // resets ballInHand, so grant it AFTER
     ballInHand = true;
@@ -490,6 +524,7 @@ function resolveShot(){
     const pottedOwn = real.some(id => legal.includes(id));
     if(pottedOwn){
       showBanner('Nice — keep shooting', 'good');
+      sfx('ui');
       newTurn();
       if(turn === 'cpu') setTimeout(cpuTake, 700);
       return;
@@ -557,8 +592,13 @@ function shoot(a, powerFrac){
   const p = Math.max(0.06, Math.min(1, powerFrac));
   cue.vx = Math.cos(a) * maxPower() * p;
   cue.vy = Math.sin(a) * maxPower() * p;
+  // tip offset: spin.y = follow(+) / draw(-), spin.x = english
+  cue.spinY = spin.y * SPIN_FOLLOW;
+  cue.spinX = spin.x * SPIN_ENGLISH;
   lastShotInfo = { firstContact:null, railAfter:false, potted:[] };
   phase = 'sim';
+  if(cue.spinX || cue.spinY) chalkPuff(cue.x, cue.y, a);
+  cueHit(Math.max(0.05, Math.min(1, powerFrac)));
   power = 0;
   syncPower();
 }
@@ -568,13 +608,20 @@ function simulateShot(){
   const acc = { firstContact:null, railAfter:false, potted:[], touched:false,
                 who:turn, wasEight:onlyEightLeft(turn), legal:legalTargets(turn) };
   const dt = DT;
+  const events = [];
   let guard = 0;
   while(anyMoving(balls) && guard < 4000){
-    const r = physics(balls, dt);
+    const r = physics(balls, dt, events);
     if(r.firstContact !== null && !acc.touched){ acc.firstContact = r.firstContact; acc.touched = true; }
     if(r.railAfter) acc.railAfter = true;
     for(const id of r.potted) if(!acc.potted.includes(id)) acc.potted.push(id);
     guard++;
+  }
+  // play the shot's audio in one pass, rate-limited inside each sound fn
+  for(const ev of events){
+    if(ev.type === 'clack') clack(ev.v);
+    else if(ev.type === 'rail') rail(ev.v);
+    else if(ev.type === 'pot') potDrop();
   }
   lastShotInfo = acc;
   for(const id of acc.potted){
@@ -854,6 +901,7 @@ function draw(){
   if(screen === 'over'){ drawTable(cssW, cssH); drawOver(cssW, cssH); return; }
   drawTable(cssW, cssH);
   drawAim();
+  drawChalk();
   for(const b of balls) if(!b.potted) drawBall(b);
   if(phase === 'aim' || phase === 'ai') drawCue();
   drawPockets();
@@ -1069,6 +1117,12 @@ function drawBall(b){
   ctx.ellipse(x-r*0.34, y-r*0.4, r*0.3, r*0.22, -0.5, 0, Math.PI*2);
   ctx.fillStyle = 'rgba(255,255,255,.62)'; ctx.fill();
 
+  // the cue ball carries the tip-contact mark so you can see the english you set
+  if(b.id === 0){
+    ctx.beginPath(); ctx.arc(x, y, r*0.17, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(40,50,70,.5)'; ctx.fill();
+  }
+
   ctx.restore();
 }
 
@@ -1117,9 +1171,15 @@ function drawCue(){
     const m = mouseTable();
     a = m ? Math.atan2(m.y - cue.y, m.x - cue.x) : 0;
   }
-  const x0 = X(cue.x), y0 = Y(cue.y);
+  // tip offset: perpendicular = english, along = follow/draw
+  const px = -Math.sin(a), py = Math.cos(a);
+  const offX = spin.x * R * 0.92, offY = spin.y * R * 0.92;
+  const contactX = cue.x + px*offX + Math.cos(a)*offY;
+  const contactY = cue.y + py*offX + Math.sin(a)*offY;
+
+  const x0 = X(contactX), y0 = Y(contactY);
   const len = S(46);
-  const bx = x0 - Math.cos(a)*(S(R)+3), by = y0 - Math.sin(a)*(S(R)+3);
+  const bx = x0 - Math.cos(a)*(S(R)*0.35), by = y0 - Math.sin(a)*(S(R)*0.35);
   const tx = bx - Math.cos(a)*len, ty = by - Math.sin(a)*len;
   const st = equippedStick();
   const g = ctx.createLinearGradient(bx,by,tx,ty);
@@ -1181,15 +1241,48 @@ function drawAim(){
     const gx = hit.x - Math.cos(a)*(2*R), gy = hit.y - Math.sin(a)*(2*R);
     ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.arc(X(gx),Y(gy),S(R),0,Math.PI*2); ctx.stroke();
-    // object ball predicted direction
+
+    // object ball leaves along the line of centres
     const ta = Math.atan2(hit.y-gy, hit.x-gx);
-    ctx.strokeStyle = 'rgba(245,196,81,.7)';
+    ctx.strokeStyle = 'rgba(245,196,81,.75)';
     ctx.setLineDash([4,4]);
     ctx.beginPath();
     ctx.moveTo(X(hit.x),Y(hit.y));
-    ctx.lineTo(X(hit.x)+Math.cos(ta)*S(30), Y(hit.y)+Math.sin(ta)*S(30));
+    ctx.lineTo(X(hit.x)+Math.cos(ta)*S(34), Y(hit.y)+Math.sin(ta)*S(34));
     ctx.stroke();
     ctx.setLineDash([]);
+
+    // ...and the cue ball squirts off along the tangent, nudged by spin.
+    // follow/draw pulls it back along the line of centres, english bends it.
+    const nx = Math.cos(a), ny = Math.sin(a);
+    let tx = -ny, ty = nx;
+    const along = spin.y * 0.85;
+    let cx2 = tx + nx * along, cy2 = ty + ny * along;
+    if(spin.x){ tx += nx * 0; cx2 += (-ny) * spin.x * 0.6; cy2 += (nx) * spin.x * 0.6; }
+    const cm = Math.hypot(cx2, cy2) || 1;
+    cx2 /= cm; cy2 /= cm;
+    ctx.strokeStyle = 'rgba(150,200,255,.7)';
+    ctx.setLineDash([3,5]);
+    ctx.beginPath();
+    ctx.moveTo(X(gx),Y(gy));
+    ctx.lineTo(X(gx)+cx2*S(26), Y(gy)+cy2*S(26));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // if that object-ball line happens to run into a pocket, flag it
+    for(const p of POCKETS){
+      const pa = Math.atan2(p.y-hit.y, p.x-hit.x);
+      let diff = Math.abs(((pa - ta + Math.PI*3) % (Math.PI*2)) - Math.PI);
+      const dist = Math.hypot(p.x-hit.x, p.y-hit.y);
+      if(diff < 0.09 && dist < 90){
+        ctx.beginPath();
+        ctx.arc(X(p.x),Y(p.y),S(POCKET_R||POCKET_R)*0.92,0,Math.PI*2);
+        ctx.strokeStyle = 'rgba(120,255,170,.85)'; ctx.lineWidth = 2.5;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        break;
+      }
+    }
   }
   ctx.restore();
 }
@@ -1224,18 +1317,27 @@ function drawStickPreview(g, s, owned){
 function updateHUD(){
   const t = document.getElementById('tYou'), c = document.getElementById('tCpu');
   const gy = document.getElementById('gYou'), gc = document.getElementById('gCpu');
-  t.textContent = groups.you ? (groups.you === 'eight' ? '8 Ball' : groups.you === 'solid' ? 'Solids' : 'Stripes') : 'Undecided';
-  c.textContent = groups.cpu ? (groups.cpu === 'eight' ? '8 Ball' : groups.cpu === 'solid' ? 'Solids' : 'Stripes') : 'Undecided';
-  gy.className = 'grp ' + (groups.you || 'none');
-  gc.className = 'grp ' + (groups.cpu || 'none');
-  document.getElementById('rYou').textContent = remaining(groups.you) ? remaining(groups.you)+' left' : '';
-  document.getElementById('rCpu').textContent = remaining(groups.cpu) ? remaining(groups.cpu)+' left' : '';
+  const you8 = onlyEightLeft('you'), cpu8 = onlyEightLeft('cpu');
+  const label = g => !g ? 'Undecided'
+                 : (you8 && g === groups.you) || (cpu8 && g === groups.cpu) ? 'THE 8'
+                 : g === 'solid' ? 'Solids' : 'Stripes';
+  t.textContent = label(groups.you);
+  c.textContent = label(groups.cpu);
+  const cls = g => (!g ? 'none' : ((you8 && g === groups.you) || (cpu8 && g === groups.cpu)) ? 'eight'
+                 : g === 'solid' ? 'solid' : 'stripe');
+  gy.className = 'grp ' + cls(groups.you);
+  gc.className = 'grp ' + cls(groups.cpu);
+  document.getElementById('rYou').textContent = remaining(groups.you) ? remaining(groups.you)+' left' : (you8 ? 'final ball' : '');
+  document.getElementById('rCpu').textContent = remaining(groups.cpu) ? remaining(groups.cpu)+' left' : (cpu8 ? 'final ball' : '');
   document.getElementById('pcYou').classList.toggle('active', turn==='you' && !gameOver);
   document.getElementById('pcCpu').classList.toggle('active', turn==='cpu' && !gameOver);
   const tt = document.getElementById('turnTxt');
-  if(gameOver){ tt.innerHTML = gameOver==='you' ? '<b>You win the rack!</b> New game to continue.' : '<b>CPU takes the rack.</b> New game to try again.'; }
+  if(gameOver){ tt.innerHTML = gameOver==='you' ? '<b>You win the rack!</b> Click for a new one.' : '<b>CPU takes the rack.</b> Click for a new one.'; }
   else if(ballInHand && turn==='you') tt.innerHTML = '<b>Ball in hand</b> — move to place, click to drop.';
-  else if(turn==='you') tt.innerHTML = 'Your shot. Aim, hold to build power, release.';
+  else if(turn==='you'){
+    tt.innerHTML = you8 ? '<b>You are on the 8.</b> Pot it to win the rack.'
+                         : 'Your shot. Aim, hold to build power, release.';
+  }
   else tt.innerHTML = 'CPU is thinking&hellip;';
 }
 
@@ -1329,27 +1431,183 @@ window.addEventListener('keyup', e => {
 });
 
 /* ═══════════════════════════════════════════════════════════════
-   SOUND — tiny synth, no assets
+   SOUND — tiny synth, no assets. Noise bursts for clacks, tuned
+   sines for body, so impacts feel physical rather than beepy.
    ═══════════════════════════════════════════════════════════════ */
-let AC = null;
+let AC = null, NOISE = null, muted = false;
 function ac(){
-  if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} }
+  if(!AC){
+    try{
+      AC = new (window.AudioContext||window.webkitAudioContext)();
+      const len = Math.floor(AC.sampleRate * 0.4);
+      NOISE = AC.createBuffer(1, len, AC.sampleRate);
+      const ch = NOISE.getChannelData(0);
+      for(let i=0;i<len;i++) ch[i] = (Math.random()*2-1) * (1 - i/len);
+    }catch(e){}
+  }
+  if(AC && AC.state === 'suspended') AC.resume();
   return AC;
 }
-function blip(freq, dur, type, gain){
+function noiseBurst(gain, dur, freq, q){
+  const a = ac(); if(!a) return;
+  const src = a.createBufferSource(); src.buffer = NOISE;
+  const bp = a.createBiquadFilter();
+  bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = q || 1.2;
+  const g = a.createGain();
+  g.gain.setValueAtTime(gain, a.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + dur);
+  src.connect(bp); bp.connect(g); g.connect(a.destination);
+  src.start(); src.stop(a.currentTime + dur);
+}
+function tone(freq, dur, type, gain, slideTo){
   const a = ac(); if(!a) return;
   const o = a.createOscillator(), g = a.createGain();
-  o.type = type || 'sine'; o.frequency.value = freq;
-  g.gain.value = gain || 0.05;
+  o.type = type || 'sine';
+  o.frequency.setValueAtTime(freq, a.currentTime);
+  if(slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, a.currentTime + dur);
+  g.gain.setValueAtTime(gain, a.currentTime);
   g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + dur);
   o.connect(g); g.connect(a.destination);
   o.start(); o.stop(a.currentTime + dur);
 }
-function sfx(k){
-  if(k === 'pot') blip(220, .16, 'triangle', .07);
-  else if(k === 'place') blip(660, .05, 'square', .03);
-  else if(k === 'win'){ blip(523,.12,'triangle',.06); setTimeout(()=>blip(784,.16,'triangle',.06),110); }
+
+/* rate limiting: a break can generate dozens of contacts in a second */
+let lastClack = 0, lastRail = 0;
+function clack(v){
+  const a = ac(); if(!a || muted) return;
+  const now = a.currentTime;
+  if(now - lastClack < 0.022) return;
+  lastClack = now;
+  const amp = Math.min(0.30, 0.035 + v * 0.0055);
+  noiseBurst(amp, 0.055, 2100 + Math.min(1500, v*46), 1.5);
+  tone(230 + Math.min(260, v*7), 0.05, 'triangle', amp*0.42);
 }
+function rail(v){
+  const a = ac(); if(!a || muted) return;
+  const now = a.currentTime;
+  if(now - lastRail < 0.035) return;
+  lastRail = now;
+  const amp = Math.min(0.20, 0.02 + v * 0.0038);
+  noiseBurst(amp*0.8, 0.085, 420 + Math.min(300, v*12), 0.9);
+  tone(120 + Math.min(70, v*2.6), 0.09, 'sine', amp*0.5);
+}
+function potDrop(){
+  if(muted) return;
+  noiseBurst(0.10, 0.10, 700, 1.0);
+  tone(190, 0.22, 'sine', 0.09, 82);
+  setTimeout(()=>{ if(!muted) noiseBurst(0.05, 0.14, 320, 0.8); }, 110);
+}
+function cueHit(power){
+  if(muted) return;
+  noiseBurst(0.05 + power*0.10, 0.035, 3200, 2.2);
+  tone(520 + power*180, 0.03, 'square', 0.03 + power*0.03);
+}
+function sfx(k){
+  if(muted) return;
+  if(k === 'place'){ noiseBurst(0.05,0.05,900,1.4); }
+  else if(k === 'win'){ [523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,.20,'triangle',.07),i*105)); }
+  else if(k === 'lose'){ [392,330,262].forEach((f,i)=>setTimeout(()=>tone(f,.26,'triangle',.06),i*130)); }
+  else if(k === 'foul'){ tone(150, .26, 'sawtooth', .05, 92); }
+  else if(k === 'ui'){ tone(720, .04, 'square', .025); }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SPIN — cue tip offset chosen on the pad.
+   spin.y > 0 follow (cue carries forward), < 0 draw (comes back)
+   spin.x < 0 left english, > 0 right english
+   ═══════════════════════════════════════════════════════════════ */
+const spin = { x:0, y:0 };
+const chalk = [];
+
+function chalkPuff(x, y, a){
+  const n = 7;
+  for(let i=0;i<n;i++){
+    const spread = (Math.random()-0.5) * 1.5;
+    const dir = a + Math.PI + spread;
+    const sp = 3 + Math.random()*7;
+    chalk.push({ x, y, vx:Math.cos(dir)*sp, vy:Math.sin(dir)*sp, life:0.42, max:0.42,
+                 r:0.5+Math.random()*0.9 });
+  }
+}
+
+function updateChalk(dt){
+  for(let i=chalk.length-1;i>=0;i--){
+    const p = chalk[i];
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    p.vx *= 0.94; p.vy *= 0.94;
+    p.life -= dt;
+    if(p.life <= 0) chalk.splice(i,1);
+  }
+}
+function drawChalk(){
+  for(const p of chalk){
+    const a = Math.max(0, p.life / p.max);
+    ctx.beginPath();
+    ctx.arc(X(p.x), Y(p.y), Math.max(1, S(p.r) * a), 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(220,235,255,' + (a*0.6).toFixed(3) + ')';
+    ctx.fill();
+  }
+}
+
+function drawSpinPad(){
+  const c = document.getElementById('spinPad');
+  const g = c.getContext('2d');
+  const w = c.width, h = c.height, cx = w/2, cy = h/2, rad = w/2 - 8;
+  g.clearRect(0,0,w,h);
+
+  // felt-ish disc
+  const bg = g.createRadialGradient(cx,cy,4,cx,cy,rad);
+  bg.addColorStop(0,'#1d5f3e'); bg.addColorStop(1,'#123a26');
+  g.beginPath(); g.arc(cx,cy,rad,0,Math.PI*2);
+  g.fillStyle = bg; g.fill();
+  g.strokeStyle = 'rgba(255,255,255,.16)'; g.lineWidth = 2; g.stroke();
+
+  // crosshair + rings
+  g.strokeStyle = 'rgba(255,255,255,.12)'; g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(cx-rad,cy); g.lineTo(cx+rad,cy);
+  g.moveTo(cx,cy-rad); g.lineTo(cx,cy+rad);
+  g.stroke();
+  g.beginPath(); g.arc(cx,cy,rad*0.45,0,Math.PI*2); g.stroke();
+
+  // the cue-ball ghost with the tip offset marked
+  g.beginPath(); g.arc(cx,cy,rad*0.78,0,Math.PI*2);
+  g.fillStyle = 'rgba(246,244,236,.16)'; g.fill();
+
+  const px = cx + spin.x * rad * 0.78;
+  const py = cy - spin.y * rad * 0.78;
+  g.beginPath(); g.arc(px,py,7,0,Math.PI*2);
+  g.fillStyle = '#ffd76a'; g.fill();
+  g.strokeStyle = 'rgba(0,0,0,.45)'; g.lineWidth = 1.5; g.stroke();
+  g.beginPath(); g.arc(px,py,13,0,Math.PI*2);
+  g.strokeStyle = 'rgba(255,215,106,.5)'; g.lineWidth = 1.5; g.stroke();
+}
+
+function setSpinFromPointer(e){
+  const c = document.getElementById('spinPad');
+  const r = c.getBoundingClientRect();
+  const cx = r.left + r.width/2, cy = r.top + r.height/2;
+  const rad = r.width/2 - 8;
+  let dx = (e.clientX - cx) / rad;
+  let dy = -(e.clientY - cy) / rad;
+  const m = Math.hypot(dx,dy);
+  if(m > MAX_SPIN){ dx = dx/m*MAX_SPIN; dy = dy/m*MAX_SPIN; }
+  spin.x = dx; spin.y = dy;
+  const l = document.getElementById('spinLabel');
+  const parts = [];
+  if(spin.y > 0.12) parts.push('FOLLOW'); else if(spin.y < -0.12) parts.push('DRAW');
+  if(spin.x > 0.12) parts.push('RIGHT'); else if(spin.x < -0.12) parts.push('LEFT');
+  l.textContent = parts.length ? parts.join(' · ') : 'CENTRE';
+  drawSpinPad();
+}
+
+let spinDragging = false;
+(function(){
+  const c = document.getElementById('spinPad');
+  c.addEventListener('mousedown', e => { spinDragging = true; setSpinFromPointer(e); e.preventDefault(); });
+  window.addEventListener('mousemove', e => { if(spinDragging) setSpinFromPointer(e); });
+  window.addEventListener('mouseup', () => { spinDragging = false; });
+})();
 
 /* ═══════════════════════════════════════════════════════════════
    LOOP
@@ -1375,6 +1633,7 @@ function frame(now){
   last = now;
   if(charging){ power = Math.min(1, power + dt*1.25); syncPower(); }
   if(phase === 'sim' && !anyMoving(balls)){ phase = 'settled'; }
+  updateChalk(dt);
   draw();
   requestAnimationFrame(frame);
 }
@@ -1382,6 +1641,11 @@ function frame(now){
 window.addEventListener('resize', () => { layout(); });
 
 document.getElementById('btnNew').onclick = startMatch;
+document.getElementById('btnSound').onclick = function(){
+  muted = !muted;
+  this.textContent = 'Sound: ' + (muted ? 'off' : 'on');
+  if(!muted){ ac(); sfx('ui'); }
+};
 document.getElementById('btnSticks').onclick = () => { renderStickList(); document.getElementById('dlgSticks').showModal(); };
 document.getElementById('btnCloseSticks').onclick = () => document.getElementById('dlgSticks').close();
 document.getElementById('pickSolid').onclick = () => assignGroups('solid');
@@ -1409,6 +1673,7 @@ layout();
 screen = 'title';
 newGame();          // warm the table so the first frame has a rack behind it
 screen = 'title';
+drawSpinPad();
 requestAnimationFrame(frame);
 
 })();

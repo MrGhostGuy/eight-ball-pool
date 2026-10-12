@@ -15,6 +15,16 @@ https://mrghostguy.github.io/eight-ball-pool/
 | Hold **click** or **Space** | Build power |
 | Release | Shoot |
 | **S** / long-press side / two-finger tap | Swap marble |
+| Click the pad by **Power** | Cue tip position (spin) |
+
+**Spin** — the pad sets where the tip strikes the cue ball:
+
+- **up** = follow (cue ball carries forward after contact)
+- **down** = draw (cue ball comes back off the cushion)
+- **left / right** = english (the cue ball throws off the contact line)
+
+Dashed guides show where the object ball and your cue ball will end up, and a
+pocket ring lights up when your line is on.
 
 After a foul you get **ball in hand** — move the mouse and click to place the
 cue ball anywhere legal.
